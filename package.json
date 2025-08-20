@@ -1,0 +1,31 @@
+{
+  "name": "acheron-connector",
+  "description": "",
+  "version": "1.0.0",
+  "author": {
+    "name": "CHILI publish",
+    "email": "info@chili-publish.com",
+    "url": "https://github.com/chili-publish"
+  },
+  "config": {
+    "connectorName": "Acheron Media Connector",
+    "type": "media",
+    "options": {},
+    "mappings": {},
+    "supportedAuth": []
+  },
+  "license": "MIT",
+  "main": "out/connector.js",
+  "dependencies": {
+    "@chili-publish/studio-connectors": "^1.28.0",
+    "typescript": "^5.2.2"
+  },
+  "scripts": {
+    "build": "yarn connector-cli build",
+    "test": "yarn connector-cli test -t tests.json && yarn connector-cli stress"
+  },
+  "devDependencies": {
+    "@chili-publish/connector-cli": "^1.9.0",
+    "@types/node": "^24.3.0"
+  }
+}
