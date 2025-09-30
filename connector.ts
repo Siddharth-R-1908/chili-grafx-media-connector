@@ -15,12 +15,37 @@ export default class MyConnector implements Media.MediaConnector {
   //   return url;
   // }
 
-  private getFullUrl(url: string): string {
-    const template =
-      "https://ashleyfurniture.scene7.com/is/image/AshleyFurniture/%data%?wid=120&hei=84&fit=fit,1&fmt=jpeg";
+  // private getFullUrl(imageId: string): string {
+  //   const template =
+  //     "https://ashleyfurniture.scene7.com/is/image/AshleyFurniture/%data%?wid=240&hei=168&fit=fit,1&fmt=jpeg";
 
-    return template.replace("%data%", url);
+  //   return template.replace("%data%", imageId);
+  // }
+
+  private getFullUrl(imageId: string, imageType?: string): string {
+    const normalizedId = imageId.trim().replace(/\s+/g, "");
+    const highResTemplate2 =
+      "https://ashleyfurniture.scene7.com/is/image/AshleyFurniture/%data%?wid=240&hei=168&fit=fit,1&fmt=jpeg";
+
+    const highResTemplate1 =
+      "https://ashleyfurniture.scene7.com/is/image/AshleyFurniture/%data%?wid=1276&hei=1020&fit=fit,1&fmt=jpeg";
+
+    const enterpriseTemplate =
+      "https://res.cloudinary.com/ashleyhub/image/upload/co_rgb:ffffff,e_colorize:100/v1657307093/MattressLogos/%data%.png"
+    // const template = imageType === "highres1" ? highResTemplate1 : highResTemplate2;
+    if (imageType === "highres1") {
+      const template = highResTemplate1
+      return template.replace("%data%", imageId);
+    } else if (imageType === "enterprise2") {
+      const template = enterpriseTemplate
+      return template.replace("%data%", normalizedId);
+    } else {
+      const template = highResTemplate2
+      return template.replace("%data%", imageId);
+    }
+
   }
+
 
   constructor(runtime: Connector.ConnectorRuntimeContext) {
     this.runtime = runtime;
@@ -30,7 +55,7 @@ export default class MyConnector implements Media.MediaConnector {
     options: Connector.QueryOptions,
     context: Connector.Dictionary,
   ): Promise<Media.MediaPage> {
-    const url = context["url"] as string;
+    const imageId = context["imageId"] as string;
     this.log(
       "QUERY",
       JSON.stringify(options, null, 4),
@@ -40,19 +65,10 @@ export default class MyConnector implements Media.MediaConnector {
     return {
       pageSize: options.pageSize ?? 1, // Note: pageSize is not currently used by the UI
 
-      // data: [
-      //   {
-      //     id: "5",
-      //     name: context["url"] as string,
-      //     relativePath: "",
-      //     type: 0,
-      //     metaData: {},
-      //   },
-      // ],
       data: [
         {
-          id: url,
-          name: url,
+          id: imageId,
+          name: imageId,
           relativePath: "",
           type: 0,
           metaData: {},
@@ -91,25 +107,29 @@ export default class MyConnector implements Media.MediaConnector {
       JSON.stringify(intent, null, 4),
     );
 
-    // const picture = await this.runtime.fetch(
-    //   this.getFullUrl(context["url"] as string),
-    //   {
-    //     method: "GET",
-    //   },
-    // );
-    const url = this.getFullUrl(context["url"] as string);
+    const url = this.getFullUrl(
+      context["imageId"] as string,
+      context["imageType"] as string
+    );
+
     const picture = await this.runtime.fetch(url, {
       method: "GET",
     });
+
     return picture.arrayBuffer;
   }
 
   getConfigurationOptions(): Connector.ConnectorConfigValue[] | null {
     return [
       {
-        name: "url",
-        displayName: "Image url",
+        name: "imageId",
+        displayName: "Image Id",
         type: "text",
+      },
+      {
+        name: "imageType",
+        displayName: "Image Type",
+        type: "text", 
       },
     ];
   }
