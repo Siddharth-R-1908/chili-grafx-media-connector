@@ -1,4 +1,13 @@
-import { type Connector, type Media } from "@chili-publish/studio-connectors";
+import { ChiliBody, type Connector, type Media } from "@chili-publish/studio-connectors";
+
+interface CustomChiliBody extends ChiliBody {
+  arrayBuffer: ArrayBuffer; // override with native ArrayBuffer type
+}
+
+export type ArrayBuffer = {
+  id: string;
+  bytes: number;
+};
 
 export default class MyConnector implements Media.MediaConnector {
   private runtime: Connector.ConnectorRuntimeContext;
@@ -7,6 +16,15 @@ export default class MyConnector implements Media.MediaConnector {
     if (!this.runtime.options["logEnabled"]) return;
     this.runtime.logError(messages.join(" "));
   }
+
+  private async getFallbackImage(): Promise<Connector.ArrayBufferPointer> {
+    const res = await this.runtime.fetch(
+      "https://res.cloudinary.com/diryu8lwp/image/upload/v1777483483/Color-white_hc2z9r.jpg",
+      { method: "GET" }
+    );
+    return res.arrayBuffer;
+  }
+
 
   // private getFullUrl(url: string): string {
   //   if (this.runtime.options["baseUrl"]) {
@@ -56,11 +74,15 @@ export default class MyConnector implements Media.MediaConnector {
     context: Connector.Dictionary,
   ): Promise<Media.MediaPage> {
     const imageId = context["imageId"] as string;
-    this.log(
-      "QUERY",
-      JSON.stringify(options, null, 4),
-      JSON.stringify(context, null, 4),
-    );
+    this.log("QUERY", JSON.stringify(options, null, 4), JSON.stringify(context, null, 4));
+
+    if (!imageId || imageId.trim() === "") {
+      return {
+        pageSize: 0,
+        data: [],
+        links: { nextPage: "" },
+      };
+    }
 
     return {
       pageSize: options.pageSize ?? 1, // Note: pageSize is not currently used by the UI
@@ -107,16 +129,46 @@ export default class MyConnector implements Media.MediaConnector {
       JSON.stringify(intent, null, 4),
     );
 
-    const url = this.getFullUrl(
-      context["imageId"] as string,
-      context["imageType"] as string
-    );
+    const imageId = id || (context["imageId"] as string);
+    const imageType = context["imageType"] as string;
 
-    const picture = await this.runtime.fetch(url, {
-      method: "GET",
-    });
+    if (!imageId || imageId.trim() === "") {
+      this.log("Skipping fetch: imageId is empty or not set.");
+      return this.getFallbackImage();
+    }
 
-    return picture.arrayBuffer;
+    // const url = this.getFullUrl(
+    //   context["imageId"] as string,
+    //   context["imageType"] as string
+    // );
+
+    // const picture = await this.runtime.fetch(url, {
+    //   method: "GET",
+    // });
+
+    // return picture.arrayBuffer;
+
+    const url = this.getFullUrl(imageId, imageType);
+    if (!url) {
+      this.log("Skipping invalid imageId:", imageId);
+      return this.getFallbackImage();
+    }
+
+    try {
+      const picture = await this.runtime.fetch(url, { method: "GET" });
+
+      // Check response status
+      if (!picture.ok) {
+        this.log("Fetch not ok for URL:", url);
+        return this.getFallbackImage();
+      }
+
+      // Return proper ArrayBufferPointer
+      return picture.arrayBuffer;
+    } catch (error) {
+      this.log("Skipping image due to fetch error:", url, (error as Error).message);
+      return this.getFallbackImage();
+    }
   }
 
   getConfigurationOptions(): Connector.ConnectorConfigValue[] | null {
@@ -129,7 +181,7 @@ export default class MyConnector implements Media.MediaConnector {
       {
         name: "imageType",
         displayName: "Image Type",
-        type: "text", 
+        type: "text",
       },
     ];
   }
