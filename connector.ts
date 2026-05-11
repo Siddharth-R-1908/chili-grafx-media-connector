@@ -10,36 +10,31 @@ export type ArrayBuffer = {
 };
 
 // ---------------------------------------------------------------------------
-// Constants — no classes, no timers, no Promise.race
-// Pure async/await with a simple retry counter loop.
-// This is the safest possible form for the GraFx connector sandbox.
+// Per-image retry configuration
+// Each image retries independently — no shared/global state between requests.
 // ---------------------------------------------------------------------------
+const MAX_RETRIES = 8;        // attempts per image before giving up
+const RETRY_DELAY_MS = 5000;  // 5s pause between retries for THAT image only
 
-const MAX_RETRIES = 8; // number of attempts before giving up
-const RETRY_DELAY_MS = 1500; // flat delay between attempts (ms)
-
-// HTTP statuses that are worth retrying
+// HTTP statuses worth retrying (transient failures)
 const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504, 524]);
 
 // ---------------------------------------------------------------------------
-// Utility: delay — defined as a standalone function using the connector
-// runtime's fetch as a side-channel timer if setTimeout is unavailable,
-// but we keep it as a simple fallback-safe no-op if neither is available.
+// Delay — per-image only, never blocks other images
+// Degrades to no-op if setTimeout is unavailable in the GraFx sandbox.
 // ---------------------------------------------------------------------------
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    // Use setTimeout if available in the sandbox; otherwise resolve immediately
-    // so the retry still happens without blocking forever.
     if (typeof setTimeout === "function") {
       setTimeout(resolve, ms);
     } else {
-      resolve();
+      resolve(); // sandbox has no setTimeout — retry immediately
     }
   });
 }
 
 // ---------------------------------------------------------------------------
-// Main connector — no class-level fields other than runtime
+// Connector
 // ---------------------------------------------------------------------------
 export default class MyConnector implements Media.MediaConnector {
   private runtime: Connector.ConnectorRuntimeContext;
@@ -48,47 +43,52 @@ export default class MyConnector implements Media.MediaConnector {
     this.runtime = runtime;
   }
 
-  // ── Logging ────────────────────────────────────────────────────────────
+  // ── Logging ──────────────────────────────────────────────────────────────
   private log(...parts: string[]): void {
     if (!this.runtime.options["logEnabled"]) return;
     this.runtime.logError("[AshleyConnector] " + parts.join(" "));
   }
 
-  // ── URL builder ────────────────────────────────────────────────────────
+  // ── URL builder ──────────────────────────────────────────────────────────
   private buildUrl(imageId: string, imageType: string): string {
     const id = imageId.trim().replace(/\s+/g, "");
 
     if (imageType === "highres1") {
-      return ("https://ashleyfurniture.scene7.com/is/image/AshleyFurniture/"+id+"?wid=1276&hei=1020&fit=fit,1&fmt=jpeg");
-    }
-    if (imageType === "enterprise2") {
+      return ("https://ashleyfurniture.scene7.com/is/image/AshleyFurniture/"+id +"?wid=1276&hei=1020&fit=fit,1&fmt=jpeg");}
+    else if (imageType === "enterprise2") {
       return ("https://res.cloudinary.com/ashleyhub/image/upload/co_rgb:ffffff,e_colorize:100/v1657307093/MattressLogos/"+id+".png");
     }
-    return (
-      "https://ashleyfurniture.scene7.com/is/image/AshleyFurniture/"+id+"?wid=240&hei=168&fit=fit,1&fmt=jpeg");
+    else {
+      return ("https://ashleyfurniture.scene7.com/is/image/AshleyFurniture/"+id+"?wid=240&hei=168&fit=fit,1&fmt=jpeg");
+    }
   }
 
-  // ── Fallback image — never throws ──────────────────────────────────────
+  // ── Fallback image — never throws ────────────────────────────────────────
   private async loadFallback(label: string): Promise<Connector.ArrayBufferPointer | null> {
     try {
-      this.log("[" + label + "] Loading fallback image");
+      this.log("[" + label + "] [FALLBACK] Attempting fallback image load");
       const res = await this.runtime.fetch(
         "https://res.cloudinary.com/diryu8lwp/image/upload/v1777483483/Color-white_hc2z9r.jpg",
         { method: "GET" }
       );
       if (res && res.arrayBuffer) {
-        this.log("[" + label + "] Fallback loaded OK");
+        this.log("[" + label + "] [FALLBACK] Loaded successfully");
         return res.arrayBuffer;
       }
-      this.log("[" + label + "] Fallback response had no arrayBuffer");
+      this.log("[" + label + "] [FALLBACK] Response had no arrayBuffer");
       return null;
     } catch (e) {
-      this.log("[" + label + "] Fallback fetch threw: " + String(e));
+      this.log("[" + label + "] [FALLBACK] Fetch threw: " + String(e));
       return null;
     }
   }
 
-  // ── Core fetch with retry ───────────────────────────────────────────────
+  // ── Per-image fetch with independent retry loop ───────────────────────────
+  //
+  // This method is called once per image. Its delay() calls only block THIS
+  // image's async chain — all other images running in parallel are completely
+  // unaffected and continue at full speed.
+  // ---------------------------------------------------------------------------
   private async fetchImage(
     url: string,
     label: string
@@ -96,58 +96,59 @@ export default class MyConnector implements Media.MediaConnector {
     let lastError = "";
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      this.log("[" + label + "] Attempt " + attempt + "/" + MAX_RETRIES + " url=" + url);
+      this.log("[" + label + "] [Attempt " + attempt + "/" + MAX_RETRIES + "] Fetching: " + url);
 
       try {
         const res = await this.runtime.fetch(url, { method: "GET" });
 
-        // Check ok flag
+        // ── HTTP status check ─────────────────────────────────────────────
         if (!res || !res.ok) {
           const status = (res as unknown as { status?: number })?.status ?? 0;
           lastError = "http_" + status;
-          this.log("[" + label + "] Attempt " + attempt + " failed: HTTP " + status);
 
-          // Non-retryable 4xx (e.g. 403, 404) — stop immediately
+          // Permanent failure — fast-fail, no retry
           if (status >= 400 && status < 500 && !RETRYABLE_STATUSES.has(status)) {
-            this.log("[" + label + "] Non-retryable status " + status + " — abort");
+            this.log("[" + label + "] [Attempt " + attempt + "] Non-retryable HTTP "+status+" — fast-failing to fallback");
             return null;
           }
 
-          // Retryable — wait and loop
+          // Transient failure — pause THIS image only, then retry
+          this.log("[" + label + "] [Attempt " + attempt + "] Transient HTTP " + status +" — pausing " + RETRY_DELAY_MS + "ms before retry (other images unaffected)");
           if (attempt < MAX_RETRIES) {
             await delay(RETRY_DELAY_MS);
           }
           continue;
         }
 
-        // Check arrayBuffer is present
+        // ── arrayBuffer presence check ────────────────────────────────────
         if (!res.arrayBuffer) {
           lastError = "no_arraybuffer";
-          this.log("[" + label + "] Attempt " + attempt + " — response missing arrayBuffer");
+          this.log("[" + label + "] [Attempt " + attempt + "] Response missing arrayBuffer" +" — pausing " + RETRY_DELAY_MS + "ms before retry");
           if (attempt < MAX_RETRIES) {
             await delay(RETRY_DELAY_MS);
           }
           continue;
         }
 
-        // Success
-        this.log("[" + label + "] Attempt " + attempt + " SUCCESS");
+        // ── Success ───────────────────────────────────────────────────────
+        this.log("[" +label+"] [Attempt " + attempt + "] SUCCESS" +(attempt > 1 ? " (recovered after " +(attempt - 1)+" failure(s))" : ""));
         return res.arrayBuffer;
 
       } catch (e) {
         lastError = String(e);
-        this.log("[" + label + "] Attempt " + attempt + " threw: " + lastError);
+        this.log("[" + label + "] [Attempt " + attempt + "] Threw: " + lastError +" — pausing " + RETRY_DELAY_MS + "ms before retry");
         if (attempt < MAX_RETRIES) {
           await delay(RETRY_DELAY_MS);
         }
       }
     }
 
-    this.log("[" + label + "] All " + MAX_RETRIES + " attempts failed. Last error: " + lastError);
+    // All attempts exhausted for this image
+    this.log("[" + label + "] [FAILED] All " + MAX_RETRIES + " attempts exhausted." +" Last error: " + lastError + " — proceeding to fallback");
     return null;
   }
 
-  // ── Media connector interface ───────────────────────────────────────────
+  // ── Media connector interface ─────────────────────────────────────────────
 
   async query(
     options: Connector.QueryOptions,
@@ -181,31 +182,31 @@ export default class MyConnector implements Media.MediaConnector {
     const imageType = ((context["imageType"] as string) ?? "").trim();
     const label = (imageId || "NO_ID") + "/" + (imageType || "default");
 
-    this.log("DOWNLOAD label=" + label + " previewType=" + previewType + " intent=" + intent);
+    this.log(
+      "DOWNLOAD label=" + label +
+      " previewType=" + previewType +
+      " intent=" + intent
+    );
 
     // Empty imageId — go straight to fallback
     if (!imageId) {
       this.log("[" + label + "] imageId empty — using fallback");
       const fb = await this.loadFallback(label);
       if (fb) return fb;
-      // If even fallback fails, return a minimal stub rather than throwing,
-      // because throwing = "issue within the download call" in GraFx.
       throw new Error("imageId empty and fallback unavailable for " + label);
     }
 
     const url = this.buildUrl(imageId, imageType);
     this.log("[" + label + "] Built URL: " + url);
 
-    // Try fetching the real image with retries
+    // Fetch with per-image independent retry loop
     const ptr = await this.fetchImage(url, label);
     if (ptr) return ptr;
 
-    // Exhausted retries — try fallback
-    this.log("[" + label + "] Retries exhausted — trying fallback");
+    // Retries exhausted — try fallback
     const fb = await this.loadFallback(label);
     if (fb) return fb;
 
-    // Both failed — throw with clear message (GraFx will log this)
     throw new Error("Image and fallback both unavailable for " + label);
   }
 
